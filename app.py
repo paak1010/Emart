@@ -4,136 +4,166 @@ from io import BytesIO
 
 st.set_page_config(page_title="수주 업로드 자동화 대시보드", layout="wide")
 
-st.title("수주 데이터 채널별 서식 자동 분류기")
-st.markdown("일반 주문서(Raw Data)를 업로드하면 점포코드 기준으로 분할하고, 내장된 맵핑 규칙에 따라 **센터코드를 배송코드로 자동 변환**하여 산출합니다.")
+st.title("수주 데이터 통합 자동 분류기 (매핑 및 그룹핑)")
+st.markdown("""
+1. 일반 주문서(Raw Data)를 업로드합니다.
+2. **제품명 시트**가 포함된 맵핑 파일(서식파일 등)을 업로드합니다.
+3. 바코드가 **상품코드(기획)**으로 변환되고, 배송코드와 상품코드가 같은 건은 **자동으로 합산**되어 **단일 파일**로 출력됩니다.
+""")
 
-# 파일 업로드 창 (다시 1개로 단일화)
-uploaded_file = st.file_uploader("📦 일반 주문서 파일(Raw Data)을 업로드하세요 (xlsx, csv)", type=['xlsx', 'xls', 'csv'])
+# 파일 업로드 창 (2개로 분리)
+col1, col2 = st.columns(2)
+with col1:
+    uploaded_raw = st.file_uploader("📦 1. 일반 주문서 (Raw Data)", type=['xlsx', 'xls', 'csv'])
+with col2:
+    uploaded_product = st.file_uploader("📋 2. 제품명 맵핑 파일 ('제품명' 시트 포함)", type=['xlsx', 'xls', 'csv'])
 
-def to_excel(df, sheet_name="Summary(수주업로드용)"):
+def to_excel(df, sheet_name="통합_수주업로드"):
+    """데이터프레임을 엑셀 파일(메모리)로 변환"""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
     return output.getvalue()
 
-if uploaded_file is not None:
+if uploaded_raw and uploaded_product:
     try:
-        # 1. 지능형 시트 탐색 (점포코드 에러 해결 로직)
-        if uploaded_file.name.endswith('.csv'):
-            raw_df = pd.read_csv(uploaded_file)
+        # ==========================================
+        # Step 1. 일반 주문서 (Raw Data) 로드
+        # ==========================================
+        if uploaded_raw.name.endswith('.csv'):
+            raw_df = pd.read_csv(uploaded_raw)
         else:
-            xls = pd.ExcelFile(uploaded_file)
-            target_sheet = xls.sheet_names[0]
-            for sheet in xls.sheet_names:
-                temp_df = pd.read_excel(xls, sheet_name=sheet, nrows=3)
+            xls_raw = pd.ExcelFile(uploaded_raw)
+            target_sheet = xls_raw.sheet_names[0]
+            for sheet in xls_raw.sheet_names:
+                temp_df = pd.read_excel(xls_raw, sheet_name=sheet, nrows=3)
                 if '점포코드' in temp_df.columns:
                     target_sheet = sheet
                     break
-            raw_df = pd.read_excel(xls, sheet_name=target_sheet)
+            raw_df = pd.read_excel(xls_raw, sheet_name=target_sheet)
             
         if '점포코드' not in raw_df.columns:
-            st.error("❌ 일반 주문서 파일의 어떤 시트에서도 '점포코드' 컬럼을 찾을 수 없습니다.")
+            st.error("❌ 일반 주문서 파일에서 '점포코드' 열을 찾을 수 없습니다.")
             st.stop()
 
-        st.success(f"✅ 파일 업로드 성공! (데이터 추출 시트: {target_sheet})")
+        # ==========================================
+        # Step 2. 제품명 맵핑 파일 로드 ('제품명' 시트)
+        # ==========================================
+        if uploaded_product.name.endswith('.csv'):
+            prod_df = pd.read_csv(uploaded_product)
+        else:
+            xls_prod = pd.ExcelFile(uploaded_product)
+            # '제품명'이라는 단어가 포함된 시트 찾기
+            prod_sheet = [s for s in xls_prod.sheet_names if '제품명' in s]
+            if not prod_sheet:
+                st.error("❌ 맵핑 파일에서 '제품명' 시트를 찾을 수 없습니다.")
+                st.stop()
+            prod_df = pd.read_excel(xls_prod, sheet_name=prod_sheet[0])
+        
+        # 맵핑을 위해 컬럼 이름 정리 (공백 제거)
+        prod_df.columns = prod_df.columns.str.strip()
+        
+        # 필수 컬럼 존재 확인 ('바코드', '상품코드(기획)')
+        if '바코드' not in prod_df.columns or '상품코드(기획)' not in prod_df.columns:
+            st.error("❌ 제품명 시트에 '바코드' 또는 '상품코드(기획)' 열이 없습니다.")
+            st.stop()
+            
+        # 상품명 컬럼 찾기 ('상품명(기획)' 우선, 없으면 '이마트 상품명' 등 사용)
+        name_col = '상품명(기획)' if '상품명(기획)' in prod_df.columns else ('이마트 상품명' if '이마트 상품명' in prod_df.columns else '상품명')
 
-        # 결측치 제거, 정수형 변환 및 센터코드 문자열 전처리
+        # VLOOKUP을 위한 키값 전처리 (문자열 변환 및 소수점 제거)
+        prod_df['바코드'] = prod_df['바코드'].astype(str).str.replace('.0', '', regex=False).str.strip()
+        raw_df['상품코드'] = raw_df['상품코드'].astype(str).str.replace('.0', '', regex=False).str.strip()
+
+        # ==========================================
+        # Step 3. 데이터 전처리 (결측치 제거, 센터코드 정리 등)
+        # ==========================================
         raw_df = raw_df.dropna(subset=['점포코드'])
         raw_df['점포코드'] = pd.to_numeric(raw_df['점포코드'], errors='coerce').fillna(0).astype(int)
         raw_df['센터코드'] = raw_df.get('센터코드', '').astype(str).str.replace('.0', '', regex=False).str.strip()
+        raw_df['수량'] = pd.to_numeric(raw_df.get('수량', 0), errors='coerce').fillna(0)
+        raw_df['발주금액'] = pd.to_numeric(raw_df.get('발주금액', 0), errors='coerce').fillna(0)
+        raw_df['발주원가'] = pd.to_numeric(raw_df.get('발주원가', 0), errors='coerce').fillna(0)
+        
+        # 수량이 0보다 큰 것만 필터링
+        raw_df = raw_df[raw_df['수량'] > 0].copy()
 
-        # 2. 채널별 데이터 분할
-        emart_mask = ((raw_df['점포코드'] >= 1000) & (raw_df['점포코드'] <= 1999)) | (raw_df['점포코드'] >= 9000)
-        traders_mask = (raw_df['점포코드'] >= 2000) & (raw_df['점포코드'] <= 2999)
-        nobrand_mask = (raw_df['점포코드'] >= 3000) & (raw_df['점포코드'] <= 3999)
-
-        emart_df = raw_df[emart_mask].copy()
-        traders_df = raw_df[traders_mask].copy()
-        nobrand_df = raw_df[nobrand_mask].copy()
-
-        # [핵심 로직] 채널별 센터코드 -> 배송코드 맵핑 딕셔너리
+        # ==========================================
+        # Step 4. 채널별 분류 및 배송코드 매핑 로직
+        # ==========================================
         mapping_dict = {
-            'emart': {
-                '9110': '81010902',
-                '9120': '81010905',
-                '9100': '81010903'
-            },
-            'traders': {
-                '9150': '81033036',
-                '9102': '89011174',
-                '9120': '81011012'
-            },
-            'nobrand': {
-                '9102': '89011175',
-                '9130': '81010904',
-                '9120': '81010968',
-                '9110': '81010969'
-            }
+            'E-mart': {'9110': '81010902', '9120': '81010905', '9100': '81010903'},
+            'E-mart(TRD)': {'9150': '81033036', '9102': '89011174', '9120': '81011012'},
+            'E-mart(노브랜드)': {'9102': '89011175', '9130': '81010904', '9120': '81010968', '9110': '81010969'}
         }
 
-        # 3. 추출 및 포맷팅 함수
-        def extract_core_columns(df, channel_type):
-            if df.empty: return pd.DataFrame()
+        def determine_customer_and_delivery(row):
+            code = row['점포코드']
+            center = row['센터코드']
             
-            # 수량 0 필터링
-            df['수량'] = pd.to_numeric(df.get('수량', 0), errors='coerce').fillna(0)
-            df = df[df['수량'] > 0].copy()
-            
-            if df.empty: return pd.DataFrame()
-            
-            # 발주코드 설정
-            if channel_type == 'traders':
-                order_code = df.get('문서번호', df.get('전표번호', '81011010'))
+            # 채널(Customer) 분류
+            if (1000 <= code <= 1999) or code >= 9000:
+                customer = 'E-mart'
+                order_code = '81010000'
+            elif 2000 <= code <= 2999:
+                customer = 'E-mart(TRD)'
+                order_code = row.get('문서번호', row.get('전표번호', '81011010'))
+            elif 3000 <= code <= 3999:
+                customer = 'E-mart(노브랜드)'
+                order_code = '81010000'
             else:
+                customer = 'Unknown'
                 order_code = '81010000'
 
-            # 배송코드 맵핑 (알려주신 딕셔너리 기준)
-            # 사전에 정의된 코드가 없으면, 기존 센터코드를 그대로 가져옵니다.
-            current_map = mapping_dict.get(channel_type, {})
-            mapped_delivery_code = df['센터코드'].map(current_map).fillna(df['센터코드'])
+            # 배송코드 매핑 (사전에 없으면 기존 센터코드 사용)
+            delivery_code = mapping_dict.get(customer, {}).get(center, center)
+            
+            return pd.Series([customer, order_code, delivery_code])
 
-            formatted = pd.DataFrame({
-                '발주코드': order_code,
-                '배송코드': mapped_delivery_code,
-                '상품코드': df.get('상품코드', ''),
-                '수량': df['수량'],
-                '단가': df.get('발주원가', 0),
-                'Total Amount': df.get('발주금액', 0)
-            })
-            return formatted
+        raw_df[['Customer', '발주코드', '배송코드']] = raw_df.apply(determine_customer_and_delivery, axis=1)
 
-        final_emart = extract_core_columns(emart_df, 'emart')
-        final_traders = extract_core_columns(traders_df, 'traders')
-        final_nobrand = extract_core_columns(nobrand_df, 'nobrand')
+        # ==========================================
+        # Step 5. 제품명(바코드) VLOOKUP 매핑
+        # ==========================================
+        # raw_df의 '상품코드'(바코드) 와 prod_df의 '바코드'를 매핑
+        merged_df = pd.merge(raw_df, prod_df[['바코드', '상품코드(기획)', name_col]], 
+                             left_on='상품코드', right_on='바코드', how='left')
 
-        # 4. 화면 출력 및 다운로드
-        st.subheader("데이터 변환 결과 및 다운로드")
+        # 매핑된 기획 코드가 없으면 원래 바코드를 그대로 사용 (에러 방지)
+        merged_df['최종_상품코드'] = merged_df['상품코드(기획)'].fillna(merged_df['상품코드'])
+        merged_df['최종_상품명'] = merged_df[name_col].fillna(merged_df.get('상품명', ''))
+
+        # ==========================================
+        # Step 6. 최종 컬럼 구성 및 그룹핑 (합치기)
+        # ==========================================
+        final_df = merged_df[[
+            'Customer', '발주코드', '배송코드', '최종_상품코드', '최종_상품명', '수량', '발주원가', '발주금액'
+        ]].copy()
         
-        col1, col2, col3 = st.columns(3)
+        final_df.rename(columns={'최종_상품코드': '상품코드', '최종_상품명': '상품명', '발주원가': '단가', '발주금액': 'Total Amount'}, inplace=True)
 
-        with col1:
-            st.markdown(f"**이마트** ({len(final_emart)}건)")
-            if not final_emart.empty:
-                st.dataframe(final_emart.head(5))
-                st.download_button("📥 이마트 다운로드", data=to_excel(final_emart), file_name="수주업로드_이마트.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            else:
-                st.info("해당 데이터 없음")
+        # 배송코드와 상품코드가 같은 데이터 합치기 (수량과 Total Amount는 더하고, 나머지는 그룹핑 기준)
+        group_cols = ['Customer', '발주코드', '배송코드', '상품코드', '상품명', '단가']
+        grouped_df = final_df.groupby(group_cols, dropna=False, as_index=False)[['수량', 'Total Amount']].sum()
 
-        with col2:
-            st.markdown(f"**트레이더스** ({len(final_traders)}건)")
-            if not final_traders.empty:
-                st.dataframe(final_traders.head(5))
-                st.download_button("📥 트레이더스 다운로드", data=to_excel(final_traders), file_name="수주업로드_트레이더스.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            else:
-                st.info("해당 데이터 없음")
+        # 정렬 (Customer 별로 예쁘게 보기 위해)
+        grouped_df = grouped_df.sort_values(by=['Customer', '배송코드'])
 
-        with col3:
-            st.markdown(f"**노브랜드** ({len(final_nobrand)}건)")
-            if not final_nobrand.empty:
-                st.dataframe(final_nobrand.head(5))
-                st.download_button("📥 노브랜드 다운로드", data=to_excel(final_nobrand), file_name="수주업로드_노브랜드.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            else:
-                st.info("해당 데이터 없음")
+        st.success("✅ 매핑 및 데이터 그룹핑이 성공적으로 완료되었습니다!")
+
+        # ==========================================
+        # Step 7. 화면 출력 및 단일 파일 다운로드
+        # ==========================================
+        st.subheader(f"📊 통합 산출 결과 (총 {len(grouped_df)}건)")
+        st.dataframe(grouped_df)
+
+        st.download_button(
+            label="📥 통합 수주업로드 다운로드 (클릭)",
+            data=to_excel(grouped_df),
+            file_name="수주업로드_통합본.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
     except Exception as e:
         st.error(f"데이터 처리 중 오류가 발생했습니다: {e}")
