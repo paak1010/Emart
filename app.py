@@ -6,16 +6,17 @@ from datetime import datetime
 
 st.set_page_config(page_title="수주 업로드 자동화 대시보드", layout="wide")
 
-st.title("수주 데이터 통합 자동 분류기 (오늘 날짜 고정판)")
+st.title("수주 데이터 통합 자동 분류기 (최종 완성본)")
 st.markdown("""
 **일반 주문서(Raw Data)** 파일만 업로드하세요.
 - 모든 발주코드는 **81010000**으로 자동 통일됩니다.
 - 깃허브 내 서식파일의 `제품명` 시트를 참조하여 바코드를 기획 코드로 변환합니다.
 - **'날짜' 열은 자동으로 오늘 날짜가 적용됩니다.**
+- 데이터는 **수량 -> 단가 -> Total Amount** 순서로 산출됩니다.
 """)
 
 # ==========================================
-# ⚙️ 1. 현재 날짜 자동 설정 (입력창 제거)
+# ⚙️ 1. 현재 날짜 자동 설정
 # ==========================================
 today_str = datetime.today().strftime("%Y%m%d")
 
@@ -133,7 +134,6 @@ if uploaded_raw:
 
         # Step 5. 최종 데이터 구성 및 합산 (Group By)
         merged_df['발주코드'] = '81010000'
-        # 미리 지정해둔 오늘 날짜(today_str)를 자동으로 삽입
         merged_df['날짜'] = today_str
         
         final_df = merged_df[[
@@ -146,8 +146,15 @@ if uploaded_raw:
         grouped_df = final_df.groupby(group_cols, dropna=False, as_index=False)[['수량', 'Total Amount']].sum()
         grouped_df = grouped_df.sort_values(by=['Customer', '배송코드'])
 
+        # ⭐ [핵심 변경] 최종 컬럼 순서를 수량 -> 단가 순으로 강제 재배치
+        final_column_order = [
+            '날짜', '배송일자', 'Customer', '발주코드', '배송코드', 
+            '상품코드', '상품명', '수량', '단가', 'Total Amount'
+        ]
+        grouped_df = grouped_df[final_column_order]
+
         # Step 6. 결과 출력 및 다운로드
-        st.success("✅ 자동 맵핑 및 데이터 합산이 완료되었습니다.")
+        st.success("✅ 컬럼 정렬 및 데이터 합산이 완료되었습니다.")
         st.dataframe(grouped_df)
 
         st.download_button(
