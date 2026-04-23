@@ -4,15 +4,11 @@ from io import BytesIO
 
 st.set_page_config(page_title="수주 업로드 자동화 대시보드", layout="wide")
 
-st.title("수주 데이터 채널별 서식 자동 분류기 (VLOOKUP 적용)")
-st.markdown("일반 주문서(Raw Data)와 **점포코드(배송코드) 맵핑 파일**을 업로드하면, VLOOKUP을 통해 센터코드를 정확한 배송코드로 변환하여 산출합니다.")
+st.title("수주 데이터 채널별 서식 자동 분류기")
+st.markdown("일반 주문서(Raw Data)를 업로드하면 점포코드 기준으로 분할하고, 내장된 맵핑 규칙에 따라 **센터코드를 배송코드로 자동 변환**하여 산출합니다.")
 
-# 1. 파일 업로드 창 2개 분리
-col1, col2 = st.columns(2)
-with col1:
-    uploaded_raw = st.file_uploader("📦 1. 일반 주문서 파일 (Raw Data)", type=['xlsx', 'xls', 'csv'])
-with col2:
-    uploaded_map = st.file_uploader("🔗 2. 점포코드 맵핑 파일 (기준정보)", type=['xlsx', 'xls', 'csv'])
+# 파일 업로드 창 (다시 1개로 단일화)
+uploaded_file = st.file_uploader("📦 일반 주문서 파일(Raw Data)을 업로드하세요 (xlsx, csv)", type=['xlsx', 'xls', 'csv'])
 
 def to_excel(df, sheet_name="Summary(수주업로드용)"):
     output = BytesIO()
@@ -20,15 +16,13 @@ def to_excel(df, sheet_name="Summary(수주업로드용)"):
         df.to_excel(writer, index=False, sheet_name=sheet_name)
     return output.getvalue()
 
-if uploaded_raw is not None and uploaded_map is not None:
+if uploaded_file is not None:
     try:
-        # ==========================================
-        # Step 1. 일반 주문서 (Raw Data) 로드 및 시트 탐색
-        # ==========================================
-        if uploaded_raw.name.endswith('.csv'):
-            raw_df = pd.read_csv(uploaded_raw)
+        # 1. 지능형 시트 탐색 (점포코드 에러 해결 로직)
+        if uploaded_file.name.endswith('.csv'):
+            raw_df = pd.read_csv(uploaded_file)
         else:
-            xls = pd.ExcelFile(uploaded_raw)
+            xls = pd.ExcelFile(uploaded_file)
             target_sheet = xls.sheet_names[0]
             for sheet in xls.sheet_names:
                 temp_df = pd.read_excel(xls, sheet_name=sheet, nrows=3)
@@ -38,47 +32,17 @@ if uploaded_raw is not None and uploaded_map is not None:
             raw_df = pd.read_excel(xls, sheet_name=target_sheet)
             
         if '점포코드' not in raw_df.columns:
-            st.error("❌ 일반 주문서 파일에서 '점포코드' 열을 찾을 수 없습니다.")
+            st.error("❌ 일반 주문서 파일의 어떤 시트에서도 '점포코드' 컬럼을 찾을 수 없습니다.")
             st.stop()
 
-        # ==========================================
-        # Step 2. 맵핑 파일 (점포코드 시트) 로드
-        # ==========================================
-        if uploaded_map.name.endswith('.csv'):
-            map_df = pd.read_csv(uploaded_map)
-        else:
-            # 맵핑 파일의 첫 번째 시트를 읽어옵니다. (점포코드 시트만 따로 저장해서 올리는 것을 권장)
-            map_df = pd.read_excel(uploaded_map)
-            
-        if '센터코드' not in map_df.columns or '배송코드' not in map_df.columns:
-            st.error("❌ 맵핑 파일에는 반드시 **'센터코드'**와 **'배송코드'**라는 열 이름이 있어야 VLOOKUP이 가능합니다. 첫 줄(헤더)을 확인해 주세요.")
-            st.stop()
+        st.success(f"✅ 파일 업로드 성공! (데이터 추출 시트: {target_sheet})")
 
-        # 병합을 위해 센터코드 데이터 타입을 문자열로 통일하고 공백/소수점 제거
-        raw_df['센터코드'] = raw_df['센터코드'].astype(str).str.replace('.0', '', regex=False).str.strip()
-        map_df['센터코드'] = map_df['센터코드'].astype(str).str.replace('.0', '', regex=False).str.strip()
-        
-        # 맵핑 파일에 중복된 센터코드가 있을 경우 첫 번째 값만 남김 (다대일 병합 방지)
-        map_df = map_df.drop_duplicates(subset=['센터코드'])
-
-        # ==========================================
-        # Step 3. VLOOKUP 실행 (pd.merge)
-        # ==========================================
-        # raw_df에 map_df의 '배송코드'를 센터코드 기준으로 레프트 조인
-        raw_df = pd.merge(raw_df, map_df[['센터코드', '배송코드']], on='센터코드', how='left')
-        
-        # 맵핑 실패 시(NaN), 빈 칸으로 남기거나 에러 방지용으로 기존 센터코드 유지
-        raw_df['배송코드'] = raw_df['배송코드'].fillna('') 
-
-        st.success("✅ 파일 업로드 및 VLOOKUP 데이터 맵핑이 완료되었습니다.")
-
-        # 결측치 제거 및 정수형 변환
+        # 결측치 제거, 정수형 변환 및 센터코드 문자열 전처리
         raw_df = raw_df.dropna(subset=['점포코드'])
         raw_df['점포코드'] = pd.to_numeric(raw_df['점포코드'], errors='coerce').fillna(0).astype(int)
+        raw_df['센터코드'] = raw_df.get('센터코드', '').astype(str).str.replace('.0', '', regex=False).str.strip()
 
-        # ==========================================
-        # Step 4. 채널별 데이터 분할 및 포맷팅
-        # ==========================================
+        # 2. 채널별 데이터 분할
         emart_mask = ((raw_df['점포코드'] >= 1000) & (raw_df['점포코드'] <= 1999)) | (raw_df['점포코드'] >= 9000)
         traders_mask = (raw_df['점포코드'] >= 2000) & (raw_df['점포코드'] <= 2999)
         nobrand_mask = (raw_df['점포코드'] >= 3000) & (raw_df['점포코드'] <= 3999)
@@ -87,6 +51,27 @@ if uploaded_raw is not None and uploaded_map is not None:
         traders_df = raw_df[traders_mask].copy()
         nobrand_df = raw_df[nobrand_mask].copy()
 
+        # [핵심 로직] 채널별 센터코드 -> 배송코드 맵핑 딕셔너리
+        mapping_dict = {
+            'emart': {
+                '9110': '81010902',
+                '9120': '81010905',
+                '9100': '81010903'
+            },
+            'traders': {
+                '9150': '81033036',
+                '9102': '89011174',
+                '9120': '81011012'
+            },
+            'nobrand': {
+                '9102': '89011175',
+                '9130': '81010904',
+                '9120': '81010968',
+                '9110': '81010969'
+            }
+        }
+
+        # 3. 추출 및 포맷팅 함수
         def extract_core_columns(df, channel_type):
             if df.empty: return pd.DataFrame()
             
@@ -96,14 +81,20 @@ if uploaded_raw is not None and uploaded_map is not None:
             
             if df.empty: return pd.DataFrame()
             
+            # 발주코드 설정
             if channel_type == 'traders':
                 order_code = df.get('문서번호', df.get('전표번호', '81011010'))
             else:
                 order_code = '81010000'
 
+            # 배송코드 맵핑 (알려주신 딕셔너리 기준)
+            # 사전에 정의된 코드가 없으면, 기존 센터코드를 그대로 가져옵니다.
+            current_map = mapping_dict.get(channel_type, {})
+            mapped_delivery_code = df['센터코드'].map(current_map).fillna(df['센터코드'])
+
             formatted = pd.DataFrame({
                 '발주코드': order_code,
-                '배송코드': df.get('배송코드', ''), # VLOOKUP으로 가져온 새로운 배송코드 매핑
+                '배송코드': mapped_delivery_code,
                 '상품코드': df.get('상품코드', ''),
                 '수량': df['수량'],
                 '단가': df.get('발주원가', 0),
@@ -115,9 +106,7 @@ if uploaded_raw is not None and uploaded_map is not None:
         final_traders = extract_core_columns(traders_df, 'traders')
         final_nobrand = extract_core_columns(nobrand_df, 'nobrand')
 
-        # ==========================================
-        # Step 5. 화면 출력 및 다운로드
-        # ==========================================
+        # 4. 화면 출력 및 다운로드
         st.subheader("데이터 변환 결과 및 다운로드")
         
         col1, col2, col3 = st.columns(3)
