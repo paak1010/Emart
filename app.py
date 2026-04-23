@@ -6,20 +6,18 @@ from datetime import datetime
 
 st.set_page_config(page_title="수주 업로드 자동화 대시보드", layout="wide")
 
-st.title("수주 데이터 통합 자동 분류기 (날짜/배송일자 추가버전)")
+st.title("수주 데이터 통합 자동 분류기 (오늘 날짜 고정판)")
 st.markdown("""
 **일반 주문서(Raw Data)** 파일만 업로드하세요.
 - 모든 발주코드는 **81010000**으로 자동 통일됩니다.
 - 깃허브 내 서식파일의 `제품명` 시트를 참조하여 바코드를 기획 코드로 변환합니다.
-- 지정한 **'날짜'**와 Raw Data의 **'점입점일자(배송일자)'**가 함께 산출됩니다.
+- **'날짜' 열은 자동으로 오늘 날짜가 적용됩니다.**
 """)
 
 # ==========================================
-# ⚙️ 1. 사용자 입력 (날짜 설정)
+# ⚙️ 1. 현재 날짜 자동 설정 (입력창 제거)
 # ==========================================
-st.subheader("📅 기준 정보 설정")
-today_input = st.date_input("기준 날짜를 선택하세요 (출력물의 '날짜' 열에 반영됩니다)", datetime.today())
-today_str = today_input.strftime("%Y%m%d") # YYYYMMDD 형태로 변환
+today_str = datetime.today().strftime("%Y%m%d")
 
 # ==========================================
 # ⚙️ 2. 서버(깃허브) 내장 서식 파일 설정
@@ -92,7 +90,7 @@ if uploaded_raw:
         raw_df['센터코드'] = raw_df.get('센터코드', '').astype(str).str.replace('.0', '', regex=False).str.strip()
         raw_df['수량'] = pd.to_numeric(raw_df.get('수량', 0), errors='coerce').fillna(0)
         
-        # [신규 추가] 점입점일자를 문자열로 변환하여 배송일자로 지정
+        # 점입점일자를 문자열로 변환하여 배송일자로 지정
         raw_df['배송일자'] = raw_df.get('점입점일자', '').astype(str).str.replace('.0', '', regex=False).str.strip()
         
         # 수량이 0보다 큰 건만 남기기
@@ -109,7 +107,6 @@ if uploaded_raw:
             code = row['점포코드']
             center = row['센터코드']
             
-            # 채널 분류
             if (1000 <= code <= 1999) or code >= 9000:
                 customer = 'E-mart'
             elif 2000 <= code <= 2999:
@@ -119,7 +116,6 @@ if uploaded_raw:
             else:
                 customer = 'Unknown'
 
-            # 배송코드 매핑
             delivery_code = mapping_dict.get(customer, {}).get(center, center)
             return pd.Series([customer, delivery_code])
 
@@ -136,24 +132,22 @@ if uploaded_raw:
         merged_df['최종_상품명'] = merged_df[name_col].fillna(merged_df.get('상품명', ''))
 
         # Step 5. 최종 데이터 구성 및 합산 (Group By)
-        # 발주코드 고정 및 날짜(오늘) 열 생성
         merged_df['발주코드'] = '81010000'
+        # 미리 지정해둔 오늘 날짜(today_str)를 자동으로 삽입
         merged_df['날짜'] = today_str
         
-        # [신규 추가] 날짜와 배송일자를 가장 앞쪽에 배치
         final_df = merged_df[[
             '날짜', '배송일자', 'Customer', '발주코드', '배송코드', '최종_상품코드', '최종_상품명', '수량', '발주원가', '발주금액'
         ]].copy()
         
         final_df.rename(columns={'최종_상품코드': '상품코드', '최종_상품명': '상품명', '발주원가': '단가', '발주금액': 'Total Amount'}, inplace=True)
 
-        # 중복 데이터 합치기 (날짜, 배송일자도 그룹 기준에 포함)
         group_cols = ['날짜', '배송일자', 'Customer', '발주코드', '배송코드', '상품코드', '상품명', '단가']
         grouped_df = final_df.groupby(group_cols, dropna=False, as_index=False)[['수량', 'Total Amount']].sum()
         grouped_df = grouped_df.sort_values(by=['Customer', '배송코드'])
 
         # Step 6. 결과 출력 및 다운로드
-        st.success("✅ 날짜 및 배송일자 적용, 데이터 합산이 완료되었습니다.")
+        st.success("✅ 자동 맵핑 및 데이터 합산이 완료되었습니다.")
         st.dataframe(grouped_df)
 
         st.download_button(
